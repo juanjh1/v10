@@ -279,9 +279,6 @@ importers:
       '@videojs/core':
         specifier: workspace:*
         version: link:../core
-      '@videojs/icons':
-        specifier: workspace:*
-        version: link:../icons
       '@videojs/store':
         specifier: workspace:*
         version: link:../store
@@ -295,6 +292,9 @@ importers:
       '@types/react':
         specifier: ^19.2.7
         version: 19.2.7
+      '@videojs/icons':
+        specifier: workspace:*
+        version: link:../icons
       jsdom:
         specifier: ^26.1.0
         version: 26.1.0
