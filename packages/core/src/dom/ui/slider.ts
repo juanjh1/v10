@@ -1,5 +1,6 @@
 import { createState, type State } from '@videojs/store';
 import { listen } from '@videojs/utils/dom';
+import { throttle } from '@videojs/utils/function';
 import { clamp, roundToStep } from '@videojs/utils/number';
 import { isNull } from '@videojs/utils/predicate';
 import type { SliderInteraction } from '../../core/ui/slider/slider-core';
@@ -23,6 +24,13 @@ export interface SliderOptions {
   getStepPercent: () => number;
   /** Large step size as 0–100 percent. Page Up/Down, Shift+Arrow. */
   getLargeStepPercent: () => number;
+
+  /**
+   * Trailing-edge throttle (ms) for `onValueCommit` during drag. When `> 0`,
+   * `onValueCommit` fires periodically while dragging, then a final unthrottled
+   * commit fires on pointer release. `0` (default) disables — commits only on release.
+   */
+  commitThrottle?: number | undefined;
 
   onValueChange?: ((percent: number) => void) | undefined;
   onValueCommit?: ((percent: number) => void) | undefined;
@@ -62,12 +70,17 @@ export function createSlider(options: SliderOptions): SliderHandle {
   });
 
   const abort = new AbortController();
+  const commitThrottleMs = options.commitThrottle ?? 0;
+
   let isDragging = false,
     moveCount = 0,
     cachedRTL = false,
     cachedRect: DOMRect | null = null,
     documentCleanup: (() => void) | null = null,
     capturedPointerId: number | null = null;
+
+  const throttledCommit =
+    commitThrottleMs > 0 ? throttle((percent: number) => options.onValueCommit?.(percent), commitThrottleMs) : null;
 
   function releaseCapture(): void {
     if (isNull(capturedPointerId)) return;
@@ -95,6 +108,7 @@ export function createSlider(options: SliderOptions): SliderHandle {
   }
 
   function cleanup() {
+    throttledCommit?.cancel();
     releaseCapture();
     documentCleanup?.();
     documentCleanup = null;
@@ -117,9 +131,11 @@ export function createSlider(options: SliderOptions): SliderHandle {
       state.patch({ dragging: true, dragPercent: percent, pointerPercent: percent });
       options.onDragStart?.();
       options.onValueChange?.(percent);
+      throttledCommit?.(percent);
     } else if (isDragging) {
       state.patch({ dragPercent: percent, pointerPercent: percent });
       options.onValueChange?.(percent);
+      throttledCommit?.(percent);
     } else {
       // Below drag threshold — update hover preview only.
       state.patch({ pointerPercent: percent });
@@ -129,6 +145,8 @@ export function createSlider(options: SliderOptions): SliderHandle {
   function onDocumentPointerUp(event: PointerEvent): void {
     const percent = getPercentFromPointerEvent(event, cachedRect!, options.getOrientation(), cachedRTL);
 
+    // Cancel pending throttled commit before the final unthrottled one.
+    throttledCommit?.cancel();
     options.onValueCommit?.(percent);
     endDrag();
   }

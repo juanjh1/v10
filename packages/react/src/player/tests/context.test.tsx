@@ -2,6 +2,7 @@ import { render, renderHook } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
+import { createMockStore } from '../../testing/mocks';
 import {
   Container,
   PlayerContextProvider,
@@ -12,15 +13,6 @@ import {
   usePlayer,
   usePlayerContext,
 } from '../context';
-
-function createMockStore() {
-  return {
-    state: { paused: true, volume: 1 },
-    attach: vi.fn(() => vi.fn()),
-    subscribe: vi.fn(() => vi.fn()),
-    destroy: vi.fn(),
-  };
-}
 
 function createWrapper(value: PlayerContextValue) {
   return function Wrapper({ children }: { children: ReactNode }) {
@@ -114,7 +106,7 @@ describe('useOptionalPlayer', () => {
   });
 
   it('returns selected state inside Provider', () => {
-    const store = createMockStore();
+    const store = createMockStore({ paused: true });
     const value: PlayerContextValue = { store: store as any, media: null, setMedia: vi.fn() };
 
     const { result } = renderHook(() => useOptionalPlayer((state: any) => state.paused), {
