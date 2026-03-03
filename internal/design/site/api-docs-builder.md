@@ -6,8 +6,8 @@ rendered documentation tables. When implementation diverges from this spec, this
 Inspired by [Base UI](https://github.com/mui/base-ui)'s API reference system. Base UI generates one JSON
 file per component part, and each part gets its own props and data-attributes tables. Our system
 aspires to the same philosophy but has a known architectural limitation: a single Props/State
-interface per component at the core level means only one part (the "primary") can own props and
-state. Non-primary parts are documented with a tag name and description only.
+interface per component at the core level means only one part (the "primary") can own core-level props
+and state. Non-primary parts get shared data attributes, custom React-specific props, and a description.
 
 **Principles:**
 
@@ -208,6 +208,7 @@ kebab-name `{name}`:
 |------|----------|----------|
 | Core | `packages/core/src/core/ui/{name}/{name}-core.ts` | Yes |
 | Data attrs | `packages/core/src/core/ui/{name}/{name}-data-attrs.ts` | No |
+| CSS vars | `packages/core/src/core/ui/{name}/{name}-css-vars.ts` | No |
 | HTML element | `packages/html/src/ui/{name}/{name}-element.ts` | No |
 | React parts index | `packages/react/src/ui/{name}/index.parts.ts` | No |
 
@@ -216,6 +217,11 @@ conversion fails (e.g., `pip-button` → `PiPButton`), a `NAME_OVERRIDES` map pr
 PascalCase name.
 
 **Multi-part detection:** A component is multi-part if and only if `index.parts.ts` exists.
+
+**Domain variant components:** Components like TimeSlider and VolumeSlider that share base
+logic (e.g., from `slider/`) must still have their own directories under `core/ui/`. The
+builder discovers components by directory — files nested inside a shared directory (like
+`slider/time-slider-core.ts`) won't be found.
 
 ### 2b. Component extraction
 
@@ -227,6 +233,7 @@ Extract from the three source files and merge into one reference object.
 |--------|----------|
 | Core file | Props interface members (if present), State interface members (if present), `defaultProps` values (if present) |
 | Data attrs file | Data attribute names, JSDoc descriptions, and inferred types (if file exists) |
+| CSS vars file | CSS custom property names and JSDoc descriptions (if file exists) |
 | HTML element file | `static tagName` value (if file exists) |
 
 **Naming conventions the builder depends on:**
@@ -237,6 +244,7 @@ Extract from the three source files and merge into one reference object.
 | State interface | `{PascalCase}State` |
 | Core class | `{PascalCase}Core` |
 | Data attrs export | `{PascalCase}DataAttrs` |
+| CSS vars export | `{PascalCase}CSSVars` |
 | HTML element class | `{PascalCase}Element` |
 
 **All symbols are optional.** Only the Core class is required. If a component has no Props
@@ -258,6 +266,7 @@ component is skipped with a warning.
 | Both Props and State | Warn, skip component | Component omitted |
 | `defaultProps` static | Silent | Props have no `default` field |
 | Data-attrs file/export | Silent | `dataAttributes: {}` |
+| CSS-vars file/export | Silent | `cssCustomProperties: {}` |
 | JSDoc on a data attribute | Silent | `description: ""` (empty string) |
 | HTML element file | Silent | No `platforms.html` section |
 
@@ -298,40 +307,71 @@ state type, the builder falls back to the existing `@type` JSDoc tag extraction.
 
 The builder discovers parts from `index.parts.ts` and matches them to HTML element files.
 
+**Re-exported parts:** When `index.parts.ts` re-exports parts from another component (source
+path doesn't start with `./`), the builder resolves the re-export back to its origin. It
+parses the origin's `index.parts.ts`, matches each re-exported name to the original local
+export, then derives the kebab segment and HTML element file from the **origin component** —
+not the current one. Re-exported parts are never primary. For example, TimeSlider re-exports
+Buffer, Fill, Thumb, Track, and Value from `../slider/index.parts`; each resolves to the
+Slider component's HTML element files (`slider-buffer-element.ts`, etc.).
+
+**Single-part fallback:** When all exports are local and filtering leaves only one part, the
+component uses single-part mode. The remaining part (typically Root) becomes the top-level
+component — its props/state/data-attrs/CSS-vars are promoted to the component level, not
+nested under `parts`. Components with re-exported parts (like TimeSlider and VolumeSlider)
+always produce multi-part output since the re-exports are resolved rather than filtered.
+
 **Primary vs. sub-part convention:**
 
-Every multi-part component has one **primary part** and one or more **sub-parts**. The
-convention is file naming:
+Every multi-part component has one **primary part** and one or more **sub-parts**.
 
-- The **root element** file is `{component}-element.ts` (e.g., `time-element.ts`)
-- **Sub-part element** files are `{component}-{part}-element.ts` (e.g., `time-group-element.ts`)
-- The primary part is whichever part maps to the root element — i.e., the part that does NOT
-  have a `{component}-{part}-element.ts` file, because its element IS the root element.
+**Primary part:** The part whose React source file instantiates the component's Core class
+(matches `new \w+Core\(`). This captures the architectural relationship — the primary part
+owns the Core — and is immune to import ordering and framework-divergent element structures.
 
-This is a naming convention, not configuration. The root element file always exists for the
-primary part; sub-parts always have their own element files.
+Sub-part element files use the naming convention `{component}-{part}-element.ts` (e.g.,
+`time-group-element.ts`) for HTML tag resolution.
 
 **Part-to-element matching:**
 
-For each named export in `index.parts.ts`:
+For each local named export in `index.parts.ts`:
 1. Derive kebab segment from the export's source path (e.g., `./time-value` → `value`)
 2. Look for `{component}-{part}-element.ts` in the HTML directory
 3. If found → sub-part (gets its own tag name)
-4. If not found → primary part (gets the root element's tag name from `{component}-element.ts`)
+4. If not found AND `{component}-element.ts` exists → check via Core-instantiation for primary
 
-**What the primary part gets:** The shared core Props, State, data attributes, and the root
-element's tag name.
+For re-exported parts: use the origin component's kebab and HTML directory for element file
+lookup. The element class name is derived from the filename convention (`kebabToPascal` of the
+basename, e.g., `slider-buffer-element.ts` → `SliderBufferElement`), not from the current
+component's PascalCase name. This same convention-based derivation is also used for local
+non-primary parts.
 
-**What sub-parts get:** Their own tag name, a description (from React component JSDoc), and
-empty props/state/dataAttributes.
+**What the primary part gets:** The shared core Props, State, data attributes, CSS custom
+properties, and the root element's tag name.
 
-**What the top-level component gets:** Empty props, state, dataAttributes, and empty platforms.
-All meaningful data lives in the `parts` record.
+**What sub-parts get:** Their own tag name, a description (from React JSDoc), shared data
+attributes from the component's `*-data-attrs.ts` file (when the sub-part's React source
+references `stateAttrMap`), and custom React-specific props (own members on the
+`{LocalName}Props` interface, excluding inherited `UIComponentProps` members and `children`).
+State and CSS custom properties remain empty.
+
+For re-exported sub-parts, data attributes come from the **origin** component's data-attrs file
+(e.g., TimeSlider.Fill uses Slider's data-attrs, not TimeSlider's), because the builder can't
+resolve spread entries and the origin file has the complete set that sub-parts inherit.
+
+**What the top-level component gets:** Empty props, state, dataAttributes, cssCustomProperties,
+and empty platforms. All meaningful data lives in the `parts` record.
+
+**Framework-divergent parts:** Parts discovered from `index.parts.ts` always get
+`platforms.react`. Parts with a matching HTML element file also get `platforms.html`. The
+renderer filters parts by framework — only parts with the current framework's platform
+entry are shown. This handles cases like Popover where Arrow, Popup, and Trigger are
+React-only compound parts with no HTML element counterparts.
 
 > **Known limitation:** Our architecture has a single Props/State interface per component at the
-> core level, so only the primary part can own them. In Base UI, each part has its own props
-> independently. If a sub-part needs its own props in the future, the core architecture would
-> need per-part interfaces.
+> core level, so only the primary part can own core-level props and state. Sub-parts can declare
+> custom React-specific props (e.g., `SliderValueProps.type`), which the builder extracts from
+> the React source. In Base UI, each part has its own props independently.
 
 ### 2c. Util discovery
 
@@ -470,9 +510,11 @@ ComponentReference
 ├── props: Record<string, PropDef>       — Empty {} for multi-part top-level
 ├── state: Record<string, StateDef>      — Empty {} for multi-part top-level
 ├── dataAttributes: Record<string, DataAttrDef>
+├── cssCustomProperties: Record<string, CSSVarDef>
 ├── platforms
-│   └── html?
-│       └── tagName: string              — e.g., "media-toggle-button"
+│   ├── html?
+│   │   └── tagName: string              — e.g., "media-toggle-button"
+│   └── react?                           — Present for React-discovered parts (object, no fields)
 └── parts?: Record<string, PartReference>  — Only for multi-part components
     └── [partId]
         ├── name: string                 — PascalCase part name (e.g., "Track")
@@ -480,9 +522,17 @@ ComponentReference
         ├── props: Record<string, PropDef>
         ├── state: Record<string, StateDef>
         ├── dataAttributes: Record<string, DataAttrDef>
+        ├── cssCustomProperties: Record<string, CSSVarDef>
         └── platforms
-            └── html?
-                └── tagName: string
+            ├── html?
+            │   └── tagName: string
+            └── react?                   — Always present (parts come from index.parts.ts)
+```
+
+**CSSVarDef:**
+
+```
+└── description: string              — JSDoc description of the CSS custom property
 ```
 
 **PropDef:**
@@ -596,6 +646,7 @@ omitted (absence means not required). This keeps JSON files small.
       "description": "Present when the button is disabled."
     }
   },
+  "cssCustomProperties": {},
   "platforms": {
     "html": {
       "tagName": "media-toggle-button"
@@ -612,6 +663,7 @@ omitted (absence means not required). This keeps JSON files small.
   "props": {},
   "state": {},
   "dataAttributes": {},
+  "cssCustomProperties": {},
   "platforms": {},
   "parts": {
     "indicator": {
@@ -651,10 +703,12 @@ omitted (absence means not required). This keeps JSON files small.
           "type": "'empty' | 'partial' | 'full'"
         }
       },
+      "cssCustomProperties": {},
       "platforms": {
         "html": {
           "tagName": "media-meter"
-        }
+        },
+        "react": {}
       }
     },
     "track": {
@@ -663,10 +717,12 @@ omitted (absence means not required). This keeps JSON files small.
       "props": {},
       "state": {},
       "dataAttributes": {},
+      "cssCustomProperties": {},
       "platforms": {
         "html": {
           "tagName": "media-meter-track"
-        }
+        },
+        "react": {}
       }
     },
     "fill": {
@@ -675,10 +731,12 @@ omitted (absence means not required). This keeps JSON files small.
       "props": {},
       "state": {},
       "dataAttributes": {},
+      "cssCustomProperties": {},
       "platforms": {
         "html": {
           "tagName": "media-meter-fill"
-        }
+        },
+        "react": {}
       }
     }
   }
@@ -826,7 +884,8 @@ Both consume the same model, which prevents anchor drift (TOC links matching ren
 H2  "API Reference"                    id="api-reference"
  ├─ H3  "Props"                        id="props"              (if props non-empty)
  ├─ H3  "State"                        id="state"              (if state non-empty)
- └─ H3  "Data attributes"             id="data-attributes"    (if dataAttributes non-empty)
+ ├─ H3  "Data attributes"             id="data-attributes"    (if dataAttributes non-empty)
+ └─ H3  "CSS custom properties"       id="css-custom-properties" (if cssCustomProperties non-empty)
 ```
 
 **Multi-part** heading structure:
@@ -837,7 +896,8 @@ H2  "API Reference"                    id="api-reference"
  │   or "{part.tagName}" (HTML)
  │  ├─ H4  "Props"                    id="{partId}-props"      (if props non-empty)
  │  ├─ H4  "State"                    id="{partId}-state"      (if state non-empty)
- │  └─ H4  "Data attributes"         id="{partId}-data-attributes" (if dataAttributes non-empty)
+ │  ├─ H4  "Data attributes"         id="{partId}-data-attributes" (if dataAttributes non-empty)
+ │  └─ H4  "CSS custom properties"   id="{partId}-css-custom-properties" (if cssCustomProperties non-empty)
  ├─ H3  next part...
  └─ ...
 ```
@@ -845,6 +905,10 @@ H2  "API Reference"                    id="api-reference"
 Multi-part H3 headings are framework-aware: React sees the PascalCase part name (e.g., "Track"),
 HTML sees the tag name (e.g., "media-meter-track"). The TOC emits both variants with
 `frameworks` metadata so the correct one displays per framework.
+
+**Framework filtering:** The TOC and rendered output only emit headings for parts the current
+framework supports (derived from `platforms` keys). React-only parts (those with
+`platforms.react` but no `platforms.html`) are hidden when viewing HTML docs.
 
 ### 5b. Util reference model
 
@@ -1051,7 +1115,25 @@ renders inline:
 
 > `ReturnType` — Description text here.
 
-### 6f. Multi-part component rendering
+### 6f. CSS custom properties table (components)
+
+Rendered by `ApiCSSVarsTable` → `CSSVarRow` → `DetailRow`. Uses the same disclosure
+pattern as data attributes tables but with no type column.
+
+**Columns:**
+
+| Variable | |
+|----------|-|
+
+- **Variable** — CSS custom property name in monospace (e.g., `--media-slider-fill`).
+- **(toggle)** — Disclosure triangle. Present if the row has a description.
+
+**Disclosure panel** (when expanded):
+
+Contains a description list (`<dl>`):
+- **Description** — Markdown-rendered description. Only shown if `description` is present.
+
+### 6g. Multi-part component rendering
 
 For multi-part components, the top-level has no tables (all empty). Each part renders as:
 
@@ -1061,6 +1143,7 @@ H3: Part name (framework-specific label)
     H4: Props (if non-empty) → Props table
     H4: State (if non-empty) → State table
     H4: Data attributes (if non-empty) → Data attributes table
+    H4: CSS custom properties (if non-empty) → CSS custom properties table
 ```
 
 **State section preamble** (framework-specific):
@@ -1068,7 +1151,7 @@ H3: Part name (framework-specific label)
 - **React:** "State is accessible via the `render`, `className`, and `style` props."
 - **HTML:** "State is reflected as data attributes for CSS styling."
 
-### 6g. Multi-overload util rendering
+### 6h. Multi-overload util rendering
 
 Each overload renders as:
 
@@ -1085,7 +1168,7 @@ heading text. Otherwise fall back to "Overload {N}".
 **Heading ID:** Labeled overloads use the kebab-case slug of the label (e.g., `"Video"` →
 `id="video"`). Unlabeled overloads use `id="overload-{n}"`.
 
-### 6h. Disclosure panel interaction
+### 6i. Disclosure panel interaction
 
 The `DetailRow` component implements an expandable disclosure pattern:
 

@@ -1,0 +1,30 @@
+.html-time-slider-basic,
+.html-time-slider-basic media-container {
+  display: block;
+  position: relative;
+}
+
+.html-time-slider-basic video {
+  width: 100%;
+}
+
+.html-time-slider-basic__slider {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 20px;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.html-time-slider-basic__slider::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: var(--media-slider-fill);
+  background: white;
+  pointer-events: none;
+}
