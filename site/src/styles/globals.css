@@ -215,10 +215,11 @@
 
 @utility data-bar {
   height: 2.5rem;
+  width: var(--data-bar-width, 100%);
   background-image: url("/data-bar-white.svg");
   background-repeat: repeat-x;
   background-size: auto 100%;
-  animation: grow-bar 1.5s ease-out forwards;
+  animation: grow-bar var(--data-bar-duration, 1.5s) ease-out forwards;
   animation-play-state: paused;
 
   [data-animate] & {
@@ -322,7 +323,7 @@
     width: 0%;
   }
   to {
-    width: 100%;
+    width: var(--data-bar-width, 100%);
   }
 }
 
