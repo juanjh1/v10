@@ -23,6 +23,7 @@ const PACKAGE_MANIFEST_CACHE = new Map<string, PackageManifest>();
 
 const PREFIX = '\x1b[35m[ejected-skins]\x1b[0m';
 const HTML_CDN_BASE = 'https://cdn.jsdelivr.net/npm/@videojs/html/cdn';
+const DEMO_VIDEO_SRC = 'https://stream.mux.com/BV3YZtogl89mg9VcNBhhnHm02Y34zI1nlMuMQfAbl3dM/highest.mp4';
 const log = {
   info: (...args: unknown[]) => console.log(PREFIX, ...args),
   warn: (...args: unknown[]) => console.warn(PREFIX, '\x1b[33mwarn:\x1b[0m', ...args),
@@ -64,6 +65,11 @@ interface ReactSkinDef {
 }
 
 type SkinDef = HtmlSkinDef | ReactSkinDef;
+type MediaType = 'video' | 'audio';
+
+function getSkinMediaType(skin: SkinDef): MediaType {
+  return skin.id.includes('audio') ? 'audio' : 'video';
+}
 
 interface EjectedSkinEntry {
   id: string;
@@ -748,8 +754,14 @@ function getHtmlSkinCdnFileName(skin: HtmlSkinDef): string {
 function prependHtmlSkinScripts(html: string, skin: HtmlSkinDef): string {
   const cdnFileName = getHtmlSkinCdnFileName(skin);
   const scriptTag = `<script type="module" src="${HTML_CDN_BASE}/${cdnFileName}.js"></script>`;
+  const cssLink = `<link rel="stylesheet" href="./player.css">`;
+  const playerTag = getSkinMediaType(skin) === 'audio' ? 'audio-player' : 'video-player';
+  const indented = html
+    .split('\n')
+    .map((l) => (l.length > 0 ? `  ${l}` : l))
+    .join('\n');
 
-  return `${scriptTag}\n\n${html}`;
+  return `${scriptTag}\n${cssLink}\n\n<${playerTag}>\n${indented}\n</${playerTag}>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -828,12 +840,35 @@ function evaluateTemplate(templateBody: string, context: Record<string, unknown>
   const fn = new Function(...keys, `return \`${templateBody}\`;`);
   const html = fn(...values) as string;
 
-  // Clean up whitespace: normalize indentation and trim
-  return html
-    .split('\n')
-    .map((line) => line.trimEnd())
+  // Clean up whitespace: dedent, trim trailing spaces, and trim outer edges.
+  const lines = html.split('\n').map((line) => line.trimEnd());
+  const minIndent = lines
+    .filter((l) => l.length > 0)
+    .reduce((min, l) => Math.min(min, l.length - l.trimStart().length), Infinity);
+
+  return lines
+    .map((l) => (l.length > 0 ? l.slice(minIndent) : l))
     .join('\n')
     .trim();
+}
+
+/**
+ * Replace `<slot name="media">` and `<slot>` (default slot) with a concrete
+ * `<video>` or `<audio>` element so the ejected HTML is self-contained.
+ */
+function replaceSlots(html: string, mediaType: MediaType): string {
+  const tag = mediaType === 'audio' ? 'audio' : 'video';
+  const playsInline = mediaType === 'video' ? ' playsinline' : '';
+  const mediaElement = `<${tag} src="${DEMO_VIDEO_SRC}"${playsInline}></${tag}>`;
+
+  // Replace the deprecated comment + slot="media" + default slot block with the
+  // media element, preserving the original indentation.
+  html = html.replace(
+    /^([ \t]*)<!--\s*@deprecated[^\n]*\n\s*<slot name="media"><\/slot>\n\s*<slot><\/slot>/m,
+    `$1${mediaElement}`
+  );
+
+  return html;
 }
 
 /**
@@ -880,7 +915,8 @@ async function processHtmlSkin(skin: HtmlSkinDef): Promise<string> {
     }
   }
 
-  const html = evaluateTemplate(templateBody, context);
+  let html = evaluateTemplate(templateBody, context);
+  html = replaceSlots(html, getSkinMediaType(skin));
 
   return prependHtmlSkinScripts(html, skin);
 }
@@ -1234,7 +1270,8 @@ function inlinePrivatePackages(source: string): { source: string; utilities: str
 
 /** Find the byte offset just past the last import statement in the source. */
 function findLastImportEnd(source: string): number {
-  const importRegex = /^import\s+.+from\s+['"][^'"]+['"];?\s*$/gm;
+  // Match both `import ... from '...'` and side-effect `import '...'`
+  const importRegex = /^import\s+(?:.+from\s+)?['"][^'"]+['"];?\s*$/gm;
   let lastEnd = 0;
   let match: RegExpExecArray | null;
   while ((match = importRegex.exec(source)) !== null) {
@@ -1316,6 +1353,7 @@ function resolvePropsInterface(source: string): string {
 type SectionKey = 'top' | 'mainType' | 'main' | 'labels' | 'components' | 'errorDialog' | 'utilities' | 'icons';
 
 const SECTION_HEADERS: Partial<Record<SectionKey, string>> = {
+  mainType: 'Skin',
   labels: 'Labels',
   components: 'Components',
   errorDialog: 'Error Dialog',
@@ -1331,6 +1369,7 @@ function hasExportModifier(statement: ts.Statement): boolean {
 function classifyDeclaration(name: string, isExported: boolean): SectionKey {
   if (isExported && name.endsWith('Skin')) return 'main';
   if (isExported && name.endsWith('SkinProps')) return 'mainType';
+  if (name === 'SEEK_TIME') return 'mainType';
   if (name.endsWith('Label')) return 'labels';
   if (name === 'ErrorDialog' || name === 'ErrorDialogClassNames' || name === 'ERROR_CLASSNAMES') return 'errorDialog';
   if (name.endsWith('Icon')) return 'icons';
@@ -1463,6 +1502,84 @@ function flattenErrorClasses(source: string): string {
 }
 
 /**
+ * Move the destructured props from the skin function body into the function
+ * argument so the signature reads e.g.:
+ *   `function VideoSkin({ children, className, poster, ...rest }: VideoSkinProps)`
+ */
+function destructureSkinProps(source: string): string {
+  return source.replace(
+    /export function (\w+Skin\w*)\(props: (\w+Props)\): ReactNode \{\n\s*const \{ (.+?) \} = props;\n/,
+    'export function $1({ $3 }: $2): ReactNode {\n'
+  );
+}
+
+/**
+ * Add a Player section to the ejected React output: imports for createPlayer,
+ * Video/Audio, and features; an exported Player instance; a typed Props
+ * interface; and an exported VideoPlayer/AudioPlayer component with @example.
+ */
+function addPlayerSection(source: string, mediaType: MediaType): string {
+  // Find the exported skin function name
+  const skinMatch = source.match(/export function (\w+Skin\w*)\(/);
+  if (!skinMatch) return source;
+
+  const skinName = skinMatch[1];
+  const isVideo = mediaType === 'video';
+  const mediaTag = isVideo ? 'Video' : 'Audio';
+  const features = isVideo ? 'videoFeatures' : 'audioFeatures';
+  const playerName = isVideo ? 'VideoPlayer' : 'AudioPlayer';
+  const propsName = `${playerName}Props`;
+  const subpath = isVideo ? 'video' : 'audio';
+  const playsInline = isVideo ? ' playsInline' : '';
+
+  // 1. Add createPlayer to the @videojs/react import
+  source = source.replace(
+    /import \{([^}]+)\} from '@videojs\/react';/,
+    (m, names) => `import { createPlayer,${names}} from '@videojs/react';`
+  );
+
+  // 2. Add Video/Audio + features import and CSS import after the @videojs/react import line
+  const mediaImport = `import { ${mediaTag}, ${features} } from '@videojs/react/${subpath}';`;
+  const cssImport = `import './player.css';`;
+  source = source.replace(/(import \{[^}]*\} from '@videojs\/react';)/, `$1\n${mediaImport}\n${cssImport}`);
+
+  // 3. Insert Player section after imports (before everything else)
+  const playerBlock = [
+    sectionHeader('Player'),
+    '',
+    `export const Player = createPlayer({ features: ${features} });`,
+    '',
+    `export interface ${propsName} {`,
+    '  src: string;',
+    '}',
+    '',
+    '/**',
+    ' * @example',
+    ' * ```tsx',
+    ` * <${playerName} src="${DEMO_VIDEO_SRC}" />`,
+    ' * ```',
+    ' */',
+    `export function ${playerName}({ src }: ${propsName}) {`,
+    '  return (',
+    '    <Player.Provider>',
+    `      <${skinName}>`,
+    `        <${mediaTag} src={src}${playsInline} />`,
+    `      </${skinName}>`,
+    '    </Player.Provider>',
+    '  );',
+    '}',
+  ].join('\n');
+
+  // Find the end of the last import statement and insert after it
+  const lastImportIdx = findLastImportEnd(source);
+  const before = source.slice(0, lastImportIdx).trimEnd();
+  const after = source.slice(lastImportIdx).trimStart();
+  source = `${before}\n\n${playerBlock}\n\n${after}`;
+
+  return source;
+}
+
+/**
  * Process a React skin: inline SVG icons, resolve all imports,
  * and produce both TSX and JSX versions.
  */
@@ -1506,7 +1623,14 @@ async function processReactSkin(skin: ReactSkinDef): Promise<{ tsx: string; jsx:
   source = flattenErrorClasses(source);
 
   // 10. Reorganize into sections with comment headers
-  const tsx = reorganizeReactOutput(source, privates.utilities, icons.iconComponents);
+  let tsx = reorganizeReactOutput(source, privates.utilities, icons.iconComponents);
+
+  // 11. Add Player section (createPlayer, imports, VideoPlayer/AudioPlayer component)
+  tsx = addPlayerSection(tsx, getSkinMediaType(skin));
+
+  // 12. Destructure skin props in function argument instead of body
+  tsx = destructureSkinProps(tsx);
+
   const jsx = tsxToJsx(tsx);
 
   return { tsx, jsx };
