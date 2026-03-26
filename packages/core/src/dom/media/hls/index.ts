@@ -1,5 +1,4 @@
 import Hls from 'hls.js';
-
 import { type Delegate, DelegateMixin } from '../../../core/media/delegate';
 import { CustomVideoElement } from '../custom-media-element';
 import { VideoProxy } from '../proxy';
@@ -9,6 +8,7 @@ export { Hls };
 
 export type PlaybackType = (typeof PlaybackTypes)[keyof typeof PlaybackTypes];
 export type SourceType = (typeof SourceTypes)[keyof typeof SourceTypes];
+export type PreloadType = '' | 'none' | 'metadata' | 'auto';
 
 export const PlaybackTypes = {
   MSE: 'mse',
@@ -26,22 +26,28 @@ const defaultConfig = {
   liveDurationInfinity: true,
   capLevelToPlayerSize: true,
   capLevelOnFPSDrop: true,
+  // Disable auto quality level/fragment loading (preload).
+  autoStartLoad: false,
 };
 
 export class HlsMediaDelegateBase implements Delegate {
-  #target: EventTarget | null = null;
+  #target: HTMLMediaElement | null = null;
   #engine: Hls | null = null;
   #loadRequested?: Promise<void> | null;
   #src: string = '';
   #debug: boolean = false;
   #type: SourceType | undefined;
   #preferPlayback: PlaybackType | undefined = 'mse';
+  #preloadOnPlayAbort?: AbortController;
+  #defaultMaxBufferLength = 0;
+  #defaultMaxBufferSize = 0;
 
   constructor() {
     this.#initialize();
   }
 
   #initialize(): void {
+    this.#preloadOnPlayAbort?.abort();
     this.#engine?.destroy();
     this.#engine = null;
 
@@ -53,6 +59,8 @@ export class HlsMediaDelegateBase implements Delegate {
       ...defaultConfig,
       debug: this.#debug,
     });
+    this.#defaultMaxBufferLength = this.#engine.config.maxBufferLength;
+    this.#defaultMaxBufferSize = this.#engine.config.maxBufferSize;
 
     if (this.#target) {
       this.#engine.attachMedia(this.#target as HTMLMediaElement);
@@ -71,6 +79,16 @@ export class HlsMediaDelegateBase implements Delegate {
   /** The underlying hls.js instance, or `null` when using native playback. */
   get engine(): Hls | null {
     return this.#engine;
+  }
+
+  get preload(): PreloadType {
+    return this.#target?.preload || 'metadata';
+  }
+
+  set preload(value: PreloadType) {
+    if (!this.#target || this.#target.preload === value) return;
+    this.#target.preload = value;
+    this.#updatePreload();
   }
 
   /** Explicit source type. When unset, inferred from the source URL extension. */
@@ -129,25 +147,58 @@ export class HlsMediaDelegateBase implements Delegate {
   load(): void {
     if (this.#engine) {
       this.#engine.loadSource(this.#src);
+      this.#updatePreload();
     } else if (this.#target) {
       (this.#target as HTMLMediaElement).src = this.#src;
     }
   }
 
-  attach(target: EventTarget): void {
+  attach(target: HTMLMediaElement): void {
     this.#target = target;
-    this.#engine?.attachMedia(target as HTMLMediaElement);
+    this.#engine?.attachMedia(target);
+    this.#updatePreload();
   }
 
   detach(): void {
+    this.#preloadOnPlayAbort?.abort();
     this.#engine?.detachMedia();
     this.#target = null;
   }
 
   destroy(): void {
+    this.#preloadOnPlayAbort?.abort();
     this.#engine?.destroy();
     this.#engine = null;
     this.#target = null;
+  }
+
+  #updatePreload(): void {
+    this.#preloadOnPlayAbort?.abort();
+
+    if (!this.#target || !this.#engine) return;
+
+    const preload = (length?: number, size?: number) => {
+      if (!this.#engine) return;
+      this.#engine.config.maxBufferLength = length ?? this.#defaultMaxBufferLength;
+      this.#engine.config.maxBufferSize = size ?? this.#defaultMaxBufferSize;
+      this.#engine.startLoad();
+    };
+
+    if (this.preload === 'auto' || !this.#target.paused) {
+      preload();
+      return;
+    }
+
+    if (this.preload === 'metadata') {
+      preload(1, 1);
+    }
+
+    // preload === 'none' or preload === 'metadata' both defer full load until play.
+    this.#preloadOnPlayAbort = new AbortController();
+    this.#target.addEventListener('play', () => preload(), {
+      signal: this.#preloadOnPlayAbort.signal,
+      once: true,
+    });
   }
 }
 
