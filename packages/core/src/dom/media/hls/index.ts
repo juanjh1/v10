@@ -2,13 +2,13 @@ import Hls from 'hls.js';
 import { type Delegate, DelegateMixin } from '../../../core/media/delegate';
 import { CustomVideoElement } from '../custom-media-element';
 import { VideoProxy } from '../proxy';
+import { HlsMediaPreloadMixin } from './preload';
 import { HlsMediaTextTracksMixin } from './text-tracks';
 
 export { Hls };
 
 export type PlaybackType = (typeof PlaybackTypes)[keyof typeof PlaybackTypes];
 export type SourceType = (typeof SourceTypes)[keyof typeof SourceTypes];
-export type PreloadType = '' | 'none' | 'metadata' | 'auto';
 
 export const PlaybackTypes = {
   MSE: 'mse',
@@ -38,37 +38,34 @@ export class HlsMediaDelegateBase implements Delegate {
   #debug: boolean = false;
   #type: SourceType | undefined;
   #preferPlayback: PlaybackType | undefined = 'mse';
-  #preloadOnPlayAbort?: AbortController;
-  #defaultMaxBufferLength = 0;
-  #defaultMaxBufferSize = 0;
 
   constructor() {
-    this.#initialize();
+    this.initEngine();
   }
 
-  #initialize(): void {
-    this.#preloadOnPlayAbort?.abort();
+  destroyEngine(): void {
     this.#engine?.destroy();
     this.#engine = null;
+  }
 
-    if (this.type !== SourceTypes.M3U8) return;
-    if (this.#preferPlayback === PlaybackTypes.NATIVE) return;
-    if (!Hls.isSupported()) return;
+  initEngine(): void {
+    if (this.#engine) this.destroyEngine();
+
+    if (!Hls.isSupported() || this.type !== SourceTypes.M3U8 || this.#preferPlayback === PlaybackTypes.NATIVE) {
+      if (this.#src) this.#requestLoad();
+      return;
+    }
 
     this.#engine = new Hls({
       ...defaultConfig,
       debug: this.#debug,
     });
-    this.#defaultMaxBufferLength = this.#engine.config.maxBufferLength;
-    this.#defaultMaxBufferSize = this.#engine.config.maxBufferSize;
 
     if (this.#target) {
       this.#engine.attachMedia(this.#target as HTMLMediaElement);
     }
 
-    if (this.#src) {
-      this.#requestLoad();
-    }
+    if (this.#src) this.#requestLoad();
   }
 
   /** The target element, or `null` when not attached. */
@@ -81,16 +78,6 @@ export class HlsMediaDelegateBase implements Delegate {
     return this.#engine;
   }
 
-  get preload(): PreloadType {
-    return this.#target?.preload || 'metadata';
-  }
-
-  set preload(value: PreloadType) {
-    if (!this.#target || this.#target.preload === value) return;
-    this.#target.preload = value;
-    this.#updatePreload();
-  }
-
   /** Explicit source type. When unset, inferred from the source URL extension. */
   get type(): SourceType | undefined {
     return this.#type ?? inferSourceType(this.#src);
@@ -99,7 +86,7 @@ export class HlsMediaDelegateBase implements Delegate {
   set type(value: SourceType | undefined) {
     if (this.#type === value) return;
     this.#type = value;
-    this.#initialize();
+    this.initEngine();
   }
 
   /** Enable hls.js debug logging. Re-initializes the engine when changed. */
@@ -110,12 +97,12 @@ export class HlsMediaDelegateBase implements Delegate {
   set debug(value: boolean) {
     if (this.#debug === value) return;
     this.#debug = value;
-    this.#initialize();
+    this.initEngine();
   }
 
   /**
    * Whether to prefer `'mse'` (hls.js) or `'native'` (browser-built-in) HLS
-   * playback. Changing this re-initializes the delegate.
+   * playback. Changing this re-initializes the engine.
    */
   get preferPlayback(): PlaybackType | undefined {
     return this.#preferPlayback;
@@ -124,7 +111,7 @@ export class HlsMediaDelegateBase implements Delegate {
   set preferPlayback(value: PlaybackType | undefined) {
     if (this.#preferPlayback === value) return;
     this.#preferPlayback = value;
-    this.#initialize();
+    this.initEngine();
   }
 
   /** The HLS source URL to load. */
@@ -147,7 +134,6 @@ export class HlsMediaDelegateBase implements Delegate {
   load(): void {
     if (this.#engine) {
       this.#engine.loadSource(this.#src);
-      this.#updatePreload();
     } else if (this.#target) {
       (this.#target as HTMLMediaElement).src = this.#src;
     }
@@ -156,49 +142,16 @@ export class HlsMediaDelegateBase implements Delegate {
   attach(target: HTMLMediaElement): void {
     this.#target = target;
     this.#engine?.attachMedia(target);
-    this.#updatePreload();
   }
 
   detach(): void {
-    this.#preloadOnPlayAbort?.abort();
     this.#engine?.detachMedia();
     this.#target = null;
   }
 
   destroy(): void {
-    this.#preloadOnPlayAbort?.abort();
-    this.#engine?.destroy();
-    this.#engine = null;
+    this.destroyEngine();
     this.#target = null;
-  }
-
-  #updatePreload(): void {
-    this.#preloadOnPlayAbort?.abort();
-
-    if (!this.#target || !this.#engine) return;
-
-    const preload = (length?: number, size?: number) => {
-      if (!this.#engine) return;
-      this.#engine.config.maxBufferLength = length ?? this.#defaultMaxBufferLength;
-      this.#engine.config.maxBufferSize = size ?? this.#defaultMaxBufferSize;
-      this.#engine.startLoad();
-    };
-
-    if (this.preload === 'auto' || !this.#target.paused) {
-      preload();
-      return;
-    }
-
-    if (this.preload === 'metadata') {
-      preload(1, 1);
-    }
-
-    // preload === 'none' or preload === 'metadata' both defer full load until play.
-    this.#preloadOnPlayAbort = new AbortController();
-    this.#target.addEventListener('play', () => preload(), {
-      signal: this.#preloadOnPlayAbort.signal,
-      once: true,
-    });
   }
 }
 
@@ -208,7 +161,7 @@ function inferSourceType(src: string): SourceType {
   return SourceTypes.M3U8;
 }
 
-export const HlsMediaDelegate = HlsMediaTextTracksMixin(HlsMediaDelegateBase);
+export const HlsMediaDelegate = HlsMediaTextTracksMixin(HlsMediaPreloadMixin(HlsMediaDelegateBase));
 
 // This is used by the web component because it needs to extend HTMLElement!
 export class HlsCustomMedia extends DelegateMixin(CustomVideoElement, HlsMediaDelegate) {}
