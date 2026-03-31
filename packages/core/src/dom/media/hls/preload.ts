@@ -1,17 +1,12 @@
 import type { Constructor } from '@videojs/utils/types';
-import type Hls from 'hls.js';
+import Hls from 'hls.js';
+
+export interface HlsEngineHost {
+  readonly engine: Hls | null;
+  readonly target: HTMLMediaElement | null;
+}
 
 export type PreloadType = '' | 'none' | 'metadata' | 'auto';
-
-interface HlsPreloadHost {
-  readonly engine: Hls | null;
-  readonly target: EventTarget | null | undefined;
-  load?(): void;
-  attach?(target: EventTarget): void;
-  detach?(): void;
-  destroy?(): void;
-  destroyEngine?(): void;
-}
 
 /**
  * Manages HLS preload behavior by mapping the media element's `preload`
@@ -21,49 +16,49 @@ interface HlsPreloadHost {
  * - `'metadata'` → minimal buffer (1 byte / 1 second), deferred full load on play.
  * - `'none'` / `''` → no start, deferred full load on play.
  */
-export function HlsMediaPreloadMixin<Base extends Constructor<HlsPreloadHost>>(BaseClass: Base) {
-  class HlsMediaPreload extends (BaseClass as Constructor<HlsPreloadHost>) {
-    #preloadAbort?: AbortController;
+export function HlsMediaPreloadMixin<Base extends Constructor<HlsEngineHost>>(BaseClass: Base) {
+  class HlsMediaPreload extends (BaseClass as Constructor<HlsEngineHost>) {
+    #preloadAbort: AbortController | null = null;
+    #preload: PreloadType = 'metadata';
     #defaultMaxBufferLength: number | undefined;
     #defaultMaxBufferSize: number | undefined;
 
+    constructor(...args: any[]) {
+      super(...args);
+
+      this.engine?.on(Hls.Events.MANIFEST_LOADING, () => this.#init());
+      this.engine?.on(Hls.Events.MEDIA_ATTACHED, () => this.#init());
+      this.engine?.on(Hls.Events.MEDIA_DETACHED, () => this.#destroy());
+      this.engine?.on(Hls.Events.DESTROYING, () => this.#destroy());
+    }
+
     get preload(): PreloadType {
-      return (this.target as HTMLMediaElement | null)?.preload || 'metadata';
+      return this.#preload;
     }
 
     set preload(value: PreloadType) {
-      const target = this.target as HTMLMediaElement | null;
-      if (!target || target.preload === value) return;
-      target.preload = value;
-      this.#updatePreload();
+      this.#preload = value;
+      this.#init();
     }
 
-    load(): void {
-      super.load?.();
-      this.#updatePreload();
-    }
-
-    attach(target: EventTarget): void {
-      super.attach?.(target);
-      this.#updatePreload();
-    }
-
-    destroyEngine(): void {
+    #destroy(): void {
       this.#preloadAbort?.abort();
-      super.destroyEngine?.();
+      this.#preloadAbort = null;
     }
 
-    detach(): void {
-      this.#preloadAbort?.abort();
-      super.detach?.();
-    }
-
-    #updatePreload(): void {
+    #init(): void {
       this.#preloadAbort?.abort();
 
       const target = this.target as HTMLMediaElement | null;
+      if (!target) return;
+
+      // Sync stored preload to the native element (may have been set before attach)
+      if (target.preload !== this.preload) {
+        target.preload = this.preload;
+      }
+
       const { engine } = this;
-      if (!target || !engine) return;
+      if (!engine) return;
 
       this.#defaultMaxBufferLength ??= engine.config.maxBufferLength;
       this.#defaultMaxBufferSize ??= engine.config.maxBufferSize;
@@ -96,5 +91,5 @@ export function HlsMediaPreloadMixin<Base extends Constructor<HlsPreloadHost>>(B
     }
   }
 
-  return HlsMediaPreload as unknown as Base;
+  return HlsMediaPreload as unknown as Base & Constructor<{ preload: PreloadType }>;
 }

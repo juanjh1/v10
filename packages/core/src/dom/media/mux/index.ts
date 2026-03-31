@@ -1,6 +1,6 @@
 import Mux from 'mux-embed';
 
-import { type Delegate, DelegateMixin } from '../../../core/media/delegate';
+import { DelegateMixin } from '../../../core/media/delegate';
 import { CustomVideoElement } from '../custom-media-element';
 import { Hls, HlsMediaDelegate } from '../hls';
 import { VideoProxy } from '../proxy';
@@ -9,7 +9,7 @@ import type { MuxDataSdk } from './types';
 
 const MUX_VIDEO_DOMAIN = 'mux.com';
 
-export class MuxMediaDelegate extends HlsMediaDelegate implements Delegate {
+export class MuxMediaDelegate extends HlsMediaDelegate {
   static PLAYER_SOFTWARE_NAME = '';
 
   #playbackId: string | null = null;
@@ -108,15 +108,22 @@ export class MuxMediaDelegate extends HlsMediaDelegate implements Delegate {
     this.#metadata = value;
   }
 
-  detach(): void {
-    this.#MuxDataSdk?.destroyMonitor(this.target as HTMLMediaElement);
+  attach(target: HTMLMediaElement): void {
+    super.attach(target);
+    this.#initializeMuxDataSdk();
+  }
 
+  detach(): void {
+    if (this.target?.mux) {
+      this.target.mux.destroy();
+      delete this.target.mux;
+    }
     super.detach();
   }
 
   load(): void {
-    this.#initializeMuxDataSdk();
     super.load();
+    this.#initializeMuxDataSdk();
   }
 
   #syncSrc(): void {
@@ -125,7 +132,7 @@ export class MuxMediaDelegate extends HlsMediaDelegate implements Delegate {
 
   #initializeMuxDataSdk(): void {
     const target = this.target as HTMLMediaElement;
-    if (!this.#MuxDataSdk || !target || target.mux) return;
+    if (!this.#MuxDataSdk || !target || (target.mux && !target.mux.deleted)) return;
 
     const {
       debug,
@@ -144,7 +151,7 @@ export class MuxMediaDelegate extends HlsMediaDelegate implements Delegate {
     metadata.view_session_id = view_session_id;
     metadata.video_id = video_id;
 
-    this.#MuxDataSdk?.monitor(this.target as HTMLMediaElement, {
+    this.#MuxDataSdk?.monitor(target, {
       debug,
       ...(beaconCollectionDomain ? { beaconCollectionDomain } : {}),
       ...(disableCookies ? { disableCookies } : {}),

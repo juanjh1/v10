@@ -18,8 +18,10 @@ type SettableKeys<T> = {
   [K in WritableKeys<T>]: T[K] extends (...args: any[]) => any ? never : K;
 }[WritableKeys<T>];
 
+type ExcludeInternal<K> = K extends `_${string}` ? never : K;
+
 export type InferDelegateProps<D extends abstract new (...args: any[]) => any> = Partial<
-  Pick<InstanceType<D>, SettableKeys<InstanceType<D>>>
+  Pick<InstanceType<D>, ExcludeInternal<SettableKeys<InstanceType<D>>>>
 >;
 
 /**

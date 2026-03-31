@@ -1,9 +1,12 @@
+import { shallowEqual } from '@videojs/utils/object';
 import Hls from 'hls.js';
-import { type Delegate, DelegateMixin } from '../../../core/media/delegate';
+import { DelegateMixin } from '../../../core/media/delegate';
 import { CustomVideoElement } from '../custom-media-element';
+import { NativeHlsMediaDelegate } from '../native-hls';
 import { VideoProxy } from '../proxy';
-import { HlsMediaPreloadMixin } from './preload';
-import { HlsMediaTextTracksMixin } from './text-tracks';
+import { HlsJsMediaDelegate } from './hlsjs';
+
+export type PreloadType = '' | 'none' | 'metadata' | 'auto';
 
 export { Hls };
 
@@ -20,108 +23,123 @@ export const SourceTypes = {
   MP4: 'video/mp4',
 };
 
-const defaultConfig = {
-  backBufferLength: 30,
-  renderTextTracksNatively: false,
-  liveDurationInfinity: true,
-  capLevelToPlayerSize: true,
-  capLevelOnFPSDrop: true,
-  // Disable auto quality level/fragment loading (preload).
-  autoStartLoad: false,
-};
-
-export class HlsMediaDelegateBase implements Delegate {
+export class HlsMediaDelegate {
   #target: HTMLMediaElement | null = null;
-  #engine: Hls | null = null;
-  #loadRequested?: Promise<void> | null;
+  #delegate: HlsJsMediaDelegate | NativeHlsMediaDelegate | null = null;
   #src: string = '';
-  #debug: boolean = false;
   #type: SourceType | undefined;
   #preferPlayback: PlaybackType | undefined = 'mse';
+  #config: Record<string, any> = {};
+  #debug: boolean = false;
+  #preload: PreloadType = 'metadata';
+  #loadRequested?: Promise<void> | null;
+  #prevEngineProps?: Record<string, any> | null;
 
-  constructor() {
-    this.initEngine();
+  get target() {
+    return this.#target;
   }
 
-  destroyEngine(): void {
-    this.#engine?.destroy();
-    this.#engine = null;
+  get engine() {
+    return this.#delegate?.engine ?? null;
   }
 
-  initEngine(): void {
-    if (this.#engine) this.destroyEngine();
-
-    if (!Hls.isSupported() || this.type !== SourceTypes.M3U8 || this.#preferPlayback === PlaybackTypes.NATIVE) {
-      if (this.#src) this.#requestLoad();
-      return;
-    }
-
-    this.#engine = new Hls({
-      ...defaultConfig,
-      debug: this.#debug,
-    });
-
-    if (this.#target) {
-      this.#engine.attachMedia(this.#target as HTMLMediaElement);
-    }
-
-    if (this.#src) this.#requestLoad();
+  get src() {
+    return this.#src;
   }
 
-  /** The target element, or `null` when not attached. */
-  get target(): EventTarget | null | undefined {
-    return this.#target ?? null;
-  }
-
-  /** The underlying hls.js instance, or `null` when using native playback. */
-  get engine(): Hls | null {
-    return this.#engine;
-  }
-
-  /** Explicit source type. When unset, inferred from the source URL extension. */
-  get type(): SourceType | undefined {
-    return this.#type ?? inferSourceType(this.#src);
-  }
-
-  set type(value: SourceType | undefined) {
-    if (this.#type === value) return;
-    this.#type = value;
-    this.initEngine();
-  }
-
-  /** Enable hls.js debug logging. Re-initializes the engine when changed. */
-  get debug(): boolean {
-    return this.#debug;
-  }
-
-  set debug(value: boolean) {
-    if (this.#debug === value) return;
-    this.#debug = value;
-    this.initEngine();
-  }
-
-  /**
-   * Whether to prefer `'mse'` (hls.js) or `'native'` (browser-built-in) HLS
-   * playback. Changing this re-initializes the engine.
-   */
-  get preferPlayback(): PlaybackType | undefined {
-    return this.#preferPlayback;
-  }
-
-  set preferPlayback(value: PlaybackType | undefined) {
-    if (this.#preferPlayback === value) return;
-    this.#preferPlayback = value;
-    this.initEngine();
-  }
-
-  /** The HLS source URL to load. */
   set src(src: string) {
     this.#src = src;
     this.#requestLoad();
   }
 
-  get src(): string {
-    return this.#src;
+  /** Explicit source type. When unset, inferred from the source URL extension. */
+  get type(): SourceType | undefined {
+    return this.#type ?? inferSourceType(this.src);
+  }
+
+  set type(value: SourceType | undefined) {
+    this.#type = value;
+    this.#requestLoad();
+  }
+
+  /** Whether to prefer `'mse'` (hls.js) or `'native'` (browser-built-in) HLS. */
+  get preferPlayback(): PlaybackType | undefined {
+    return this.#preferPlayback;
+  }
+
+  set preferPlayback(value: PlaybackType | undefined) {
+    this.#preferPlayback = value;
+    this.#requestLoad();
+  }
+
+  get config() {
+    return this.#config;
+  }
+
+  set config(config: Record<string, any>) {
+    this.#config = config;
+    this.#requestLoad();
+  }
+
+  get debug() {
+    return this.#debug;
+  }
+
+  set debug(debug: boolean) {
+    this.#debug = debug;
+    this.#requestLoad();
+  }
+
+  get preload() {
+    return this.#preload;
+  }
+
+  set preload(value: PreloadType) {
+    this.#preload = value;
+    if (this.#delegate) {
+      this.#delegate.preload = value;
+    }
+  }
+
+  attach(target: HTMLMediaElement) {
+    this.#target = target;
+    this.#delegate?.attach(target);
+  }
+
+  detach() {
+    this.#target = null;
+    this.#delegate?.detach();
+  }
+
+  destroy() {
+    this.#engineDestroy();
+    this.detach();
+  }
+
+  load() {
+    this.#loadRequested = null;
+
+    if (this.#shouldEngineUpdate(this.#engineProps())) {
+      this.#engineDestroy();
+      this.#prevEngineProps = this.#engineProps();
+
+      const useMse =
+        Hls.isSupported() && this.type === SourceTypes.M3U8 && this.preferPlayback !== PlaybackTypes.NATIVE;
+
+      this.#delegate = useMse
+        ? new HlsJsMediaDelegate({ config: { ...this.config, debug: this.debug } })
+        : new NativeHlsMediaDelegate();
+
+      if (this.target) {
+        this.#delegate.attach(this.target);
+      }
+
+      this.#delegate.preload = this.preload;
+    }
+
+    if (this.#delegate) {
+      this.#delegate.src = this.#src;
+    }
   }
 
   async #requestLoad() {
@@ -131,27 +149,24 @@ export class HlsMediaDelegateBase implements Delegate {
     this.load();
   }
 
-  load(): void {
-    if (this.#engine) {
-      this.#engine.loadSource(this.#src);
-    } else if (this.#target) {
-      (this.#target as HTMLMediaElement).src = this.#src;
-    }
+  #shouldEngineUpdate(nextEngineProps: Record<string, any>) {
+    return !shallowEqual(this.#prevEngineProps, nextEngineProps);
   }
 
-  attach(target: HTMLMediaElement): void {
-    this.#target = target;
-    this.#engine?.attachMedia(target);
+  #engineProps() {
+    return {
+      config: this.config,
+      debug: this.debug,
+      preferPlayback: this.preferPlayback,
+      type: this.type,
+    };
   }
 
-  detach(): void {
-    this.#engine?.detachMedia();
-    this.#target = null;
-  }
-
-  destroy(): void {
-    this.destroyEngine();
-    this.#target = null;
+  #engineDestroy(): void {
+    this.#delegate?.destroy();
+    this.#delegate = null;
+    this.#prevEngineProps = null;
+    this.#loadRequested = null;
   }
 }
 
@@ -161,10 +176,6 @@ function inferSourceType(src: string): SourceType {
   return SourceTypes.M3U8;
 }
 
-export const HlsMediaDelegate = HlsMediaTextTracksMixin(HlsMediaPreloadMixin(HlsMediaDelegateBase));
-
-// This is used by the web component because it needs to extend HTMLElement!
 export class HlsCustomMedia extends DelegateMixin(CustomVideoElement, HlsMediaDelegate) {}
 
-// This is used by the React component.
 export class HlsMedia extends DelegateMixin(VideoProxy, HlsMediaDelegate) {}
