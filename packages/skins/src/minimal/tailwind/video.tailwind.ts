@@ -30,7 +30,7 @@ export const root = (isShadowDOM: boolean) =>
     '[--media-controls-background-color:transparent]',
     '[--media-controls-transition-duration:100ms]',
     '[--media-controls-transition-timing-function:ease-out]',
-    '[--media-error-dialog-transition-duration:250ms]',
+    '[--media-error-dialog-transition-duration:150ms]',
     '[--media-error-dialog-transition-delay:100ms]',
     '[--media-error-dialog-transition-timing-function:ease-out]',
     '[--media-popup-transition-duration:100ms]',

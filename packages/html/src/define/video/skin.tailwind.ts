@@ -6,6 +6,7 @@ import {
   buttonGroupEnd,
   buttonGroupStart,
   controls,
+  error,
   icon,
   iconContainer,
   iconFlipped,
@@ -29,6 +30,7 @@ import { SkinMixin } from '../skin-mixin';
 import '../media/container';
 import '../ui/buffering-indicator';
 import '../ui/captions-button';
+import '../ui/error-dialog';
 import '../ui/controls';
 import '../ui/fullscreen-button';
 import '../ui/mute-button';
@@ -62,6 +64,18 @@ function getTemplateHTML() {
           ${renderIcon('spinner')}
         </div>
       </media-buffering-indicator>
+
+      <media-error-dialog class="${error.root}">
+        <div class="${error.dialog}">
+          <div class="${error.content}">
+            <media-alert-dialog-title class="${error.title}">Something went wrong.</media-alert-dialog-title>
+            <media-alert-dialog-description class="${error.description}"></media-alert-dialog-description>
+          </div>
+          <div class="${error.actions}">
+            <media-alert-dialog-close class="${cn(button.base, button.primary)}">OK</media-alert-dialog-close>
+          </div>
+        </div>
+      </media-error-dialog>
 
       <media-controls data-controls="" class="${controls}">
         <media-tooltip-group>
