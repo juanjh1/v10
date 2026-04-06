@@ -20,6 +20,7 @@ const createConfig = (mode: BuildMode): UserConfig => ({
   outDir: `dist/${mode}`,
   define: {
     __DEV__: mode === 'dev' ? 'true' : 'false',
+    __VERSION__: JSON.stringify(process.env.npm_package_version),
   },
   dts: mode === 'dev',
 });

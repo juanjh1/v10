@@ -9,4 +9,4 @@
 
 // Public API exports will be added here as features are implemented
 
-export const VERSION = '0.1.0';
+export const VERSION = __VERSION__;
